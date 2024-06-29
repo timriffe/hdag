@@ -78,13 +78,30 @@ LEi <-
   facet_wrap(~state_dag) +
   theme_minimal()
 
-                                                                                 dags |> 
-      group_by(state_dag, transition) |> summarise(dag = sum(dag)) |> 
-                                                                                   mutate(state_dag = factor(state_dag, 
-                                                                                                             levels = c("HLEdag","ULEdag","LEdag"))) |>                                                                 ggplot(aes(x=state_dag, fill = transition, y = dag)) +
-                                                                                   geom_col() +
-                                                                                   theme_minimal()
+dags |> 
+  group_by(state_dag, transition) |> 
+  summarise(dag = sum(dag)) |> 
+  mutate(state_dag = factor(state_dag, 
+         levels = c("HLEdag","ULEdag","LEdag"))) |>
+  ggplot(aes(x=state_dag, fill = transition, y = dag)) +
+  geom_col() +
+  theme_minimal()
 
-                                                                                 dags |> 
-                                                                                   group_by(state_dag) |> 
-                                                                                   summarize(dag = sum(dag))
+dags |> 
+  group_by(state_dag) |> 
+  summarize(dag = sum(dag))
+
+
+# Here's a cheap lifetable edagger, low quality
+n  = nrow(adl)
+lx = lh$lh + lu$lu
+dx = lh$lh * c(adl$HD,1) + lu$lu * c(adl$UD,1)
+ex = rev(cumsum(rev(lx))) / lx
+sum(dx * ex)
+
+# this is smaller
+dags |> 
+  filter(transition %in% c("hd","ud"),
+         state_dag == "LEdag") |> 
+  summarize(sum(dag))
+
