@@ -1,21 +1,22 @@
 library(tidyverse)
 source("https://raw.githubusercontent.com/timriffe/ms_dist/master/code/00_setup.R")
 source("https://raw.githubusercontent.com/timriffe/ms_dist/master/code/01_functions.R")
-# adl <- read_csv("hrs_adl_iadl_all.csv") |> 
-#   filter(measure == "ADL",
-#          sex == "f")
+adl <- read_csv("Data/hrs_adl_iadl_all.csv") |>
+  filter(measure == "ADL",
+         sex == "f") %>%
+  select(-measure, -sex)
 
 init <- init_constant(adl[1,])
 
 lh <- adl |>  
-  select(-measure, -sex) |> 
-  p_tibble2lxs(init = init, state="H") |> 
+  select(-measure, -sex) |>
+  p_tibble2lxs(init  = init, 
+               state = "H") |> 
   rename(lh = lxs)
 
-lu <- 
-  adl |>  
+lu <- adl |>  
   select(-measure, -sex) |> 
-  p_tibble2lxs(init = init, state="U") |> 
+  p_tibble2lxs(init = init, state = "U") |> 
   rename(lu = lxs)
 
 LEi <- 
@@ -42,8 +43,7 @@ LEi <-
   pivot_wider(names_from = expectancy, values_from = LEi) |> 
   rename(age = age_from)
 
-dags <-       
-adl |>   
+dags <- adl |>   
   select(-HH, -UU) |>
   left_join(lh,by=join_by(age)) |> 
   left_join(lu,by=join_by(age)) |> 
@@ -88,17 +88,34 @@ dags |>
   geom_col() +
   theme_minimal()
 
-dags |> 
-  group_by(state_dag) |> 
-  summarize(dag = sum(dag))
+
+
 
 
 # Here's a cheap lifetable edagger, low quality
 n  = nrow(adl)
 lx = lh$lh + lu$lu
-dx = lh$lh * c(adl$HD,1) + lu$lu * c(adl$UD,1)
+wh = lh$lh / (lh$lh + lu$lu)
+wh = wh[-length(wh)]
+wu = lu$lu / (lh$lh + lu$lu)
+wu = wu[-length(wu)]
+dx = lh$lh * c(adl$HD, 1) + lu$lu * c(adl$UD, 1)
 ex = rev(cumsum(rev(lx))) / lx
-sum(ex * dx)
+sum(ex[-length(ex)] * dx[-length(dx)])
+
+
+test <- dags |> 
+  group_by(state_dag, age) |> 
+  summarize(dag = sum(dag)) %>% 
+  filter(state_dag != "LEdag") %>%
+  pivot_wider(names_from  = state_dag,
+              values_from = dag) %>% 
+  mutate(wh = wh,
+         wu = wu) %>% 
+  mutate(LEdag = wh * HLEdag + wu * ULEdag)
+
+sum(test$LEdag)
+
 
 a <- dags |> 
   filter(transition %in% c("hd","ud"),
