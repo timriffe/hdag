@@ -1,22 +1,22 @@
-
 library(tidyverse)
 source("https://raw.githubusercontent.com/timriffe/ms_dist/master/code/00_setup.R")
 source("https://raw.githubusercontent.com/timriffe/ms_dist/master/code/01_functions.R")
-adl <- read_csv("https://raw.githubusercontent.com/timriffe/ms_dist/master/hrs_adl_iadl_all.csv") |> 
+adl <- read_csv("Data/hrs_adl_iadl_all.csv") |>
   filter(measure == "ADL",
-         sex == "f")
+         sex == "f") %>%
+  select(-measure, -sex)
 
 init <- init_constant(adl[1,])
 
-lh <- 
-  adl |>  
-  select(-measure, -sex) |> 
-  p_tibble2lxs(init = init, state="H") |> 
+lh <- adl |>  
+  select(-measure, -sex) |>
+  p_tibble2lxs(init  = init, 
+               state = "H") |> 
   rename(lh = lxs)
-lu <- 
-  adl |>  
+
+lu <- adl |>  
   select(-measure, -sex) |> 
-  p_tibble2lxs(init = init, state="U") |> 
+  p_tibble2lxs(init = init, state = "U") |> 
   rename(lu = lxs)
 
 LEi <- 
@@ -42,9 +42,9 @@ LEi <-
   select(!starts_with("state")) |> 
   pivot_wider(names_from = expectancy, values_from = LEi) |> 
   rename(age = age_from)
-                                                                                 dags <-       
-  adl |>   
-  select(-HH, - UU) |>
+
+dags <- adl |>   
+  select(-HH, -UU) |>
   left_join(lh,by=join_by(age)) |> 
   left_join(lu,by=join_by(age)) |> 
   left_join(LEi, by = join_by(age)) |> 
@@ -68,9 +68,10 @@ LEi <-
                values_to = "dag") |> 
   separate_wider_delim(dag_component, 
                        delim = "_", 
-                       names = c("state_dag","transition")) 
+                       names = c("state_dag", "transition"))
 
-                                                                                 dags |> 
+                                                                         
+dags |> 
   mutate(state_dag = factor(state_dag, 
                             levels = c("HLEdag","ULEdag","LEdag"))) |>
   ggplot(aes(x = age, y = dag, color = transition)) +
@@ -87,21 +88,78 @@ dags |>
   geom_col() +
   theme_minimal()
 
-dags |> 
-  group_by(state_dag) |> 
-  summarize(dag = sum(dag))
+
+
 
 
 # Here's a cheap lifetable edagger, low quality
 n  = nrow(adl)
 lx = lh$lh + lu$lu
-dx = lh$lh * c(adl$HD,1) + lu$lu * c(adl$UD,1)
+wh = lh$lh / (lh$lh + lu$lu)
+wh = wh[-length(wh)]
+wu = lu$lu / (lh$lh + lu$lu)
+wu = wu[-length(wu)]
+dx = lh$lh * c(adl$HD, 1) + lu$lu * c(adl$UD, 1)
 ex = rev(cumsum(rev(lx))) / lx
-sum(dx * ex)
+sum(ex[-length(ex)] * dx[-length(dx)])
 
-# this is smaller
-dags |> 
+
+test <- dags |> 
+  group_by(state_dag, age) |> 
+  summarize(dag = sum(dag)) %>% 
+  filter(state_dag != "LEdag") %>%
+  pivot_wider(names_from  = state_dag,
+              values_from = dag) %>% 
+  mutate(wh = wh,
+         wu = wu) %>% 
+  mutate(LEdag = wh * HLEdag + wu * ULEdag)
+
+sum(test$LEdag)
+
+
+a <- dags |> 
   filter(transition %in% c("hd","ud"),
          state_dag == "LEdag") |> 
-  summarize(sum(dag))
+  group_by(age) %>% 
+  summarize(a = sum(dag)) %>% 
+  pull(a)
 
+
+# RT: NOTE
+# Here is what we have for e-dagger
+# look at the plot. see?
+# there is one additional point on the right
+# this is die to the p_tibble2lxs where we introduce an additional age
+# in some examples it might be actually very big
+# like in my with SILC data with OAGE
+plot((dx * ex))
+lines(a, col = "red")
+
+# now lets remove it
+# in this case this value is very small.
+# so still big difference.
+# maybe there is something else?
+# I will check the code carefully
+sum((dx * ex)[-62])
+sum(a)
+
+
+# classic ax
+lt <- tibble(age = 50:111,
+             lx,
+             dx,
+             ex)
+
+e_dagger <- sum(dx * ex / lx)
+H        <- e_dagger / ex[1]
+
+lt <- lt %>%
+  mutate(
+    e_dagger_x = cumsum(dx * ex) / lx,
+    entropy_x  = e_dagger_x / ex
+  )
+
+# ax - age 81
+lt %>%
+  filter(abs(entropy_x - H) == 
+           min(abs(entropy_x - H)))
