@@ -56,18 +56,14 @@ LEi <- test %>%
     ) |>
     mutate(age_from = as.integer(age_from), 
            age_to   = as.integer(age_to)) |>
-    filter(age_to > age_from) |> 
+    filter(age_to >= age_from) |> 
     group_by(state_from, age_from, state_to) |>
-  # !!!!!
     summarize(LEi = sum(lxs), .groups = "drop") |>
     mutate(expectancy = paste0(state_to, "LE", tolower(state_from))) |>
     select(!starts_with("state")) |>
     pivot_wider(names_from  = expectancy, values_from = LEi) |>
     rename(age = age_from)
-lu %>% 
-  full_join(lh) %>%
-  full_join(LEi) %>%
-  as_tibble()
+
 # join and calculate daggers and lifetable for classic dagger
 daggers <- lu %>% 
   full_join(lh) %>%
@@ -75,17 +71,17 @@ daggers <- lu %>%
   as_tibble() %>% 
   full_join(test) %>% 
   mutate(
-         HLEdag_hu = HU * lh * (HLEh - HLEu),
-         HLEdag_hd = HD * lh * HLEh,
-         HLEdag_uh = UH * lu * (HLEu - HLEh),
+         HLEdag_hu = (HU * lh) / sum(HU * lh,na.rm=T) * (HLEh - HLEu),
+         HLEdag_hd = (HD * lh) / sum(HD * lh,na.rm=T) * HLEh,
+         HLEdag_uh = (UH * lu) / sum(UH * lu,na.rm=T) * (HLEu - HLEh),
          # negative
-         HLEdag_ud = UD * lu * HLEu,
+         HLEdag_ud = (UD * lu) / sum(UD * lu,na.rm=T) * HLEu,
          
-         ULEdag_hu = HU * lh * (ULEh - ULEu),
+         ULEdag_hu = (HU * lh) / sum(HU * lh,na.rm=T) * (ULEh - ULEu),
          # negative
-         ULEdag_hd = HD * lh * ULEh,
-         ULEdag_uh = UH * lu * (ULEu - ULEh),
-         ULEdag_ud = UD * lu * ULEu,
+         ULEdag_hd = (HD * lh) / sum(HD * lh,na.rm=T) * ULEh,
+         ULEdag_uh = (UH * lu) / sum(UH * lu,na.rm=T) * (ULEu - ULEh),
+         ULEdag_ud = (UD * lu) / sum(UD * lu,na.rm=T) * ULEu,
          
          LEdag_hu = ULEdag_hu + HLEdag_hu,
          LEdag_hd = ULEdag_hd + HLEdag_hd,
@@ -94,16 +90,25 @@ daggers <- lu %>%
          ) %>% 
   mutate(lx = lh + lu,
          dx = lx - lead(lx),
+         dx2 = lh * HD + lu * UD,
          ex = rev(cumsum(rev(lx))) / lx,
          ex2 = (HLEh + ULEh) * lh/lx + (HLEu + ULEu) * lu/lx,
          # these two should be euqal but are not
          edex  = dx * ex,
          edex2 = (lu * UD + lh * HD) * ex2,
-         other = lu * UD * (HLEu + ULEu) + lh * HD * (HLEh + ULEh))
-View(daggers)
-plot(daggers$ex)
-lines(daggers$ex2)
+         other = lu * UD * ((HLEu + ULEu) * lu/lx + (HLEh + ULEh) * lh/lx)+
+                 lh * HD * ((HLEh + ULEh) * lh/lx + (HLEu + ULEu) * lu/lx))
 
+daggers$HLEdag_hd |> sum(na.rm=T) +
+daggers$HLEdag_ud |> sum(na.rm=T)
+
+daggers$ULEdag_hd |> sum(na.rm=T)+
+daggers$ULEdag_ud |> sum(na.rm=T)
+
+sum(daggers$edex, na.rm=TRUE)
+
+sum(daggers$edex2, na.rm=TRUE)
+daggers$other |> sum(na.rm=TRUE)
 # very similar but are NOT equal
 daggers |> select(age,ex,ex2) |> head()
   
