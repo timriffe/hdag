@@ -12,34 +12,35 @@ load("test_data_for_edagger.RData")
 
 
 # filter only one year and one sex
-test <- final %>% 
+ptibble <- final %>% 
   filter(time == 2013, sex == "female") %>% 
   unite(state, c("from", "to"), sep = "") %>%
   pivot_wider(names_from  = state,
               values_from = prob) %>% 
-  dplyr::select(-c(1, 2))
+  dplyr::select(-c(1, 2)) |> 
+  add_row(age=111,UD=1,HD=1,HH=0,HU=0,UH=0,UU=0)
 
 # all good with sum constraints
-test %>% 
+ptibble %>% 
   dplyr::select(-1) %>% 
   rowSums()
 
 # calculate initial constant
-initial <- test %>% 
+initial <- ptibble %>% 
   slice(1) %>%
   init_constant()
 
 # calculate lh and lu
-lh <- test %>%
+lh <- ptibble %>%
   p_tibble2lxs(init = initial, state = "H") %>%
   rename(lh = lxs)
 
-lu <- test %>% 
+lu <- ptibble %>% 
   p_tibble2lxs(init = initial, state = "U") %>%
   rename(lu = lxs)
 
 # calculate the LE conditional on from state
-LEi <- test %>% 
+LEi <- ptibble %>% 
     p_tibble2N() |>
     as.data.frame() |>
     rownames_to_column("state_age_to") |>
@@ -65,78 +66,74 @@ LEi <- test %>%
     rename(age = age_from)
 
 # join and calculate daggers and lifetable for classic dagger
-daggers <- lu %>% 
-  full_join(lh) %>%
-  full_join(LEi) %>%
+daggers <-
+  lu %>% 
+  full_join(lh, by = join_by(age)) %>%
+  full_join(LEi, by = join_by(age)) %>%
   as_tibble() %>% 
-  full_join(test) %>% 
-  mutate(
-         HLEdag_hu = (HU * lh) / sum(HU * lh,na.rm=T) * (HLEh - HLEu),
-         HLEdag_hd = (HD * lh) / sum(HD * lh,na.rm=T) * HLEh,
-         HLEdag_uh = (UH * lu) / sum(UH * lu,na.rm=T) * (HLEu - HLEh),
-         # negative
-         HLEdag_ud = (UD * lu) / sum(UD * lu,na.rm=T) * HLEu,
-         
-         ULEdag_hu = (HU * lh) / sum(HU * lh,na.rm=T) * (ULEh - ULEu),
-         # negative
-         ULEdag_hd = (HD * lh) / sum(HD * lh,na.rm=T) * ULEh,
-         ULEdag_uh = (UH * lu) / sum(UH * lu,na.rm=T) * (ULEu - ULEh),
-         ULEdag_ud = (UD * lu) / sum(UD * lu,na.rm=T) * ULEu,
-         
-         LEdag_hu = ULEdag_hu + HLEdag_hu,
-         LEdag_hd = ULEdag_hd + HLEdag_hd,
-         LEdag_uh = ULEdag_uh + HLEdag_uh,
-         LEdag_ud = ULEdag_ud + HLEdag_ud
-         ) %>% 
+  full_join(ptibble, by = join_by(age)) %>% 
+  # calculate lt quantities
   mutate(lx = lh + lu,
-         dx = lx - lead(lx),
-         dx2 = lh * HD + lu * UD,
+         dx = lx - lead(lx, default = 0),
          ex = rev(cumsum(rev(lx))) / lx,
-         ex2 = (HLEh + ULEh) * lh/lx + (HLEu + ULEu) * lu/lx,
-         # these two should be euqal but are not
-         edex  = dx * ex,
-         edex2 = (lu * UD + lh * HD) * ex2,
-         other = lu * UD * ((HLEu + ULEu) * lu/lx + (HLEh + ULEh) * lh/lx)+
-                 lh * HD * ((HLEh + ULEh) * lh/lx + (HLEu + ULEu) * lu/lx))
+         edag = dx * ex) |> 
+  filter(age <= 110) |> 
+  # calculate transfers
+  mutate(HDt = HD * lh,
+         HUt = HU * lh,
+         UHt = UH * lu,
+         UDt = UD * lu) |> 
+  # t suffix stands for transfers
+    mutate(
+      # HLE
+      HLEdag_hu = HUt * (HLEh - HLEu),
+      HLEdag_hd =  HDt * HLEh,
+      HLEdag_uh =  UHt * (HLEu - HLEh),
+      HLEdag_ud =  UDt * HLEu,
+      # ULE
+      ULEdag_hu =  HUt * (ULEh - ULEu),
+      ULEdag_hd =  HDt * ULEh,
+      ULEdag_uh =  UHt * (ULEu - ULEh),
+      ULEdag_ud =  UDt * ULEu,
+      # LE
+      LEdag_hu = ULEdag_hu + HLEdag_hu,
+      LEdag_hd = ULEdag_hd + HLEdag_hd,
+      LEdag_uh = ULEdag_uh + HLEdag_uh,
+      LEdag_ud = ULEdag_ud + HLEdag_ud) |> 
+    # w-suffix stands for weighted
+    mutate(
+      # HLE
+      HLEdag_huw = HLEdag_hu / sum(HUt),
+      HLEdag_hdw = HLEdag_hd / sum(HDt),
+      HLEdag_uhw = HLEdag_uh / sum(UHt),
+      HLEdag_udw = HLEdag_ud / sum(UDt),
+      # ULE
+      ULEdag_huw = ULEdag_hu / sum(HUt),
+      ULEdag_hdw = ULEdag_hd / sum(HDt),
+      ULEdag_uhw = ULEdag_uh / sum(UHt),
+      ULEdag_udw = ULEdag_ud / sum(UDt),
+      # LE (weights are the same)
+      LEdag_huw = ULEdag_huw + HLEdag_huw,
+      LEdag_hdw = ULEdag_hdw + HLEdag_hdw,
+      LEdag_uhw = ULEdag_uhw + HLEdag_uhw,
+      LEdag_udw = ULEdag_udw + HLEdag_udw) |> 
+  # other quantities xd means "by death" i.e. x is either h or u
+  mutate(HLEdag_xdw = HLEh * HDt / sum(dx) +
+                      HLEu * UDt / sum(dx),
+         ULEdag_xdw = ULEh * HDt / sum(dx) +
+                     ULEu * UDt / sum(dx),
+         LEdag_xdw = HLEdag_xdw + ULEdag_xdw
+         )
+     
+# survey results so far
+ daggers |>
+   select(age, contains("dag")) |> 
+   summarize(across(-1,\(x) sum(x, na.rm = TRUE))) |> 
+   pivot_longer(everything(), names_to = "variable", values_to = "value") |> 
+   mutate(weighted = ifelse(grepl(variable,pattern="w"),"w","t"),
+          variable = gsub(variable,pattern="w", replacement = "")) |> 
+   pivot_wider(names_from = weighted, values_from = value)
+         
 
-daggers$HLEdag_hd |> sum(na.rm=T) +
-daggers$HLEdag_ud |> sum(na.rm=T)
-
-daggers$ULEdag_hd |> sum(na.rm=T)+
-daggers$ULEdag_ud |> sum(na.rm=T)
-
-sum(daggers$edex, na.rm=TRUE)
-
-sum(daggers$edex2, na.rm=TRUE)
-daggers$other |> sum(na.rm=TRUE)
-# very similar but are NOT equal
-daggers |> select(age,ex,ex2) |> head()
-  
-# these two are the same and should be the same
-# HLE
-(daggers$HLEh  * (daggers$lh / daggers$lx)) + 
-(daggers$HLEu  * (daggers$lu / daggers$lx)) + 
-
-# PLUS + ULE
-(daggers$ULEh  * (daggers$lh / daggers$lx)) + 
-(daggers$ULEu  * (daggers$lu / daggers$lx))
-
-# is same as
-daggers$ex
-
-
-# this is classic edagger
-
-sum(daggers$edex, na.rm = T)
-
-# this is edagger calculated from your yesterday formula
-sum(daggers$other, na.rm = T)
-
-# this is the h_dagger and it is just a smidge larger than classic edagger
-# BUT is exactly equal to the e-dagger from you yesterday formula
-sum(daggers$HLEdag_hd, na.rm = T) +
-sum(daggers$HLEdag_ud, na.rm = T) +
-sum(daggers$ULEdag_hd, na.rm = T) +
-sum(daggers$ULEdag_ud, na.rm = T)
 
 
