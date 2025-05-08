@@ -2,26 +2,27 @@
 library(tidyverse)
 source("https://raw.githubusercontent.com/timriffe/ms_dist/master/code/00_setup.R")
 source("https://raw.githubusercontent.com/timriffe/ms_dist/master/code/01_functions.R")
-adl <- read_csv("https://raw.githubusercontent.com/timriffe/ms_dist/master/hrs_adl_iadl_all.csv") |> 
+adl <- read_csv("https://raw.githubusercontent.com/timriffe/ms_dist/master/data/share_all.csv",show_col_types = FALSE) |> 
   filter(measure == "ADL",
-         sex == "f")
-
+         age <=110) 
+adl |> tail()
 init <- init_constant(adl[1,])
+
 
 lh <- 
   adl |>  
-  select(-measure, -sex) |> 
+  select(-measure, -sex, -country, -version) |> 
   p_tibble2lxs(init = init, state="H") |> 
   rename(lh = lxs)
 lu <- 
   adl |>  
-  select(-measure, -sex) |> 
+  select(-measure, -sex, -country, -version) |> 
   p_tibble2lxs(init = init, state="U") |> 
   rename(lu = lxs)
 
 LEi <- 
   adl |> 
-  select(-measure, - sex) |> 
+  select(-measure, -sex, -country, -version) |> 
   p_tibble2N() |> 
   as.data.frame() |> 
   rownames_to_column("state_age_to") |> 
@@ -42,7 +43,7 @@ LEi <-
   select(!starts_with("state")) |> 
   pivot_wider(names_from = expectancy, values_from = LEi) |> 
   rename(age = age_from)
-                                                                                 dags <-       
+                                                                    dags <-       
   adl |>   
   select(-HH, - UU) |>
   left_join(lh,by=join_by(age)) |> 
@@ -99,9 +100,45 @@ dx = lh$lh * c(adl$HD,1) + lu$lu * c(adl$UD,1)
 ex = rev(cumsum(rev(lx))) / lx
 sum(dx * ex)
 
+# compare ex:
+prev = lh$lh / (lh$lh + lu$lu)
+ex2 <- 
+LEi |> 
+  mutate(
+    prev = prev,
+    ex = prev * HLEh + prev * ULEh +
+           (1-prev) * HLEu + (1-prev) * ULEu) |> 
+  pull(ex)
+
+LEi |> 
+  ggplot(aes(x = age, y = HLEh)) +
+  geom_line()
+
+dags |> filter(state_dag == "LEdag") |> pull(dag) |> sum()
 # this is smaller
 dags |> 
   filter(transition %in% c("hd","ud"),
          state_dag == "LEdag") |> 
   summarize(sum(dag))
+
+LEi |> 
+  pivot_longer(-age, names_to = "type", values_to = "expectancy") |>   ggplot(aes(x = age, y = expectancy, color = type)) +
+  geom_line() +
+  theme_minimal()
+
+# are these just sensitivities?
+source("https://raw.githubusercontent.com/timriffe/ms_sensitivity/refs/heads/master/R/00_functions_classic.R")
+source("https://raw.githubusercontent.com/timriffe/ms_sensitivity/refs/heads/master/R/00_sensitivity_functions.R")
+spt <- 
+p_tibble |> 
+  pivot_longer(-age, names_to = "transition", values_to = "p") |> 
+  s2t(init = init, expectancy = "h") |> 
+  mutate(age = age + 50) |> 
+  filter(transition !="init") 
+spt |>   
+ggplot(aes(x= age, y = effect, color = transition)) +
+  geom_line() +
+  theme_minimal()
+
+s2t
 
