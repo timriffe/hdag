@@ -114,7 +114,7 @@ daggers <-
       ULEdag_hdw = ULEdag_hd / sum(HDt),
       ULEdag_uhw = ULEdag_uh / sum(UHt),
       ULEdag_udw = ULEdag_ud / sum(UDt),
-      # LE (weights are the same)
+      # LE (weights are the same for each row here)
       LEdag_huw = ULEdag_huw + HLEdag_huw,
       LEdag_hdw = ULEdag_hdw + HLEdag_hdw,
       LEdag_uhw = ULEdag_uhw + HLEdag_uhw,
