@@ -66,6 +66,8 @@ LEi <- ptibble %>%
     rename(age = age_from)
 
 # join and calculate daggers and lifetable for classic dagger
+int <- 1 # ager interval
+
 daggers <-
   lu %>% 
   full_join(lh, by = join_by(age)) %>%
@@ -86,14 +88,14 @@ daggers <-
   # t suffix stands for transfers
     mutate(
       # HLE
-      HLEdag_hu = HUt * (HLEh - HLEu),
+      HLEdag_hu = HUt * (int + lead(HLEh, default = 0) - lead(HLEu, default = 0)),
       HLEdag_hd =  HDt * HLEh,
-      HLEdag_uh =  UHt * (HLEu - HLEh),
+      HLEdag_uh =  UHt * (-int + lead(HLEu, default = 0) - lead(HLEh, default = 0)),
       HLEdag_ud =  UDt * HLEu,
       # ULE
-      ULEdag_hu =  HUt * (ULEh - ULEu),
+      ULEdag_hu =  HUt * (-int + lead(ULEh, default = 0) - lead(ULEu, default = 0)),
       ULEdag_hd =  HDt * ULEh,
-      ULEdag_uh =  UHt * (ULEu - ULEh),
+      ULEdag_uh =  UHt * (int + lead(ULEu, default = 0) - lead(ULEh, default = 0)),
       ULEdag_ud =  UDt * ULEu,
       # LE
       LEdag_hu = ULEdag_hu + HLEdag_hu,
@@ -117,7 +119,8 @@ daggers <-
       LEdag_hdw = ULEdag_hdw + HLEdag_hdw,
       LEdag_uhw = ULEdag_uhw + HLEdag_uhw,
       LEdag_udw = ULEdag_udw + HLEdag_udw) |> 
-  # other quantities xd means "by death" i.e. x is either h or u
+  # other quantities;
+  # 'xd' means "by death" i.e. x is either h or u
   mutate(HLEdag_xdw = HLEh * HDt / sum(dx) +
                       HLEu * UDt / sum(dx),
          ULEdag_xdw = ULEh * HDt / sum(dx) +
@@ -132,8 +135,20 @@ daggers <-
    pivot_longer(everything(), names_to = "variable", values_to = "value") |> 
    mutate(weighted = ifelse(grepl(variable,pattern="w"),"w","t"),
           variable = gsub(variable,pattern="w", replacement = "")) |> 
-   pivot_wider(names_from = weighted, values_from = value)
+   pivot_wider(names_from = weighted, values_from = value) |> 
+   View()
          
-
-
+ daggers |>
+   select(age, contains("dag")) |> 
+   summarize(across(-1,\(x) sum(x, na.rm = TRUE))) |> 
+   pivot_longer(everything(), names_to = "variable", values_to = "value") |> 
+   filter(variable %in% c("LEdag_hu","LEdag_hd","LEdag_uh","LEdag_ud")) |> 
+   pull(value) |> sum()
+   
+ daggers |>
+   select(age, contains("dag")) |> 
+   summarize(across(-1,\(x) sum(x, na.rm = TRUE))) |> 
+   pivot_longer(everything(), names_to = "variable", values_to = "value") |> 
+   filter(variable %in% c("LEdag_hd","LEdag_ud")) |> 
+   pull(value) |> sum()
 
