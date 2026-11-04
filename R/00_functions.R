@@ -6,7 +6,7 @@
 #   append_death_observations()  Append observed terminal deaths; 02_prepare_SHARE.R
 #   fit_msm_health()             Fit sex-specific MSMs for one health measure; 03_estimate_hazards.R
 #   init_constant()              Set initial H/U composition; 08_hdag.R, 09_manhattan.R
-#   calc_dxh_fast()              Build the 2D healthy/unhealthy death mass; 09_manhattan.R
+#   calc_dxh()                   Build the 2D healthy/unhealthy death mass; 09_manhattan.R
 #   find_share_file()            Find a SHARE module in files or ZIPs; 01_extract_SHARE_files.R
 #   read_hmd_product()           Read a Spanish HMD product; 05_smooth_HMD.R
 #   prepare_hmd_product()        Tidy HMD deaths or exposures; 05_smooth_HMD.R
@@ -61,7 +61,8 @@ for (package_name in packages_to_load) {
   )
 }
 
-
+# some globals:
+ax_assumption_global <- 0.05
 
 #' Gather and recode one SHARE wave's interview health records.
 #' Used by: R/02_prepare_SHARE.R.
@@ -336,72 +337,210 @@ init_constant <- function(x) {
 
 #' Calculate the 2D distribution of healthy and unhealthy years at death.
 #' Used by: calculate_group_dxh() in R/09_manhattan.R.
-calc_dxh_fast <- function(p_tibble,
-                          age_int = 1,
-                          init = c(H = 1, U = 0),
-                          keep_zero = FALSE) {
+# Standalone 2D healthy/unhealthy-years death-distribution function.
+# Source this file to define calc_dxh(). It requires dplyr and tibble.
+
+#' Calculate the 2D distribution of healthy and unhealthy years at death,
+#' allowing transitions at fraction ax of each interval. ax = 0 assigns the
+#' full interval to the destination state; ax = 1 assigns it to the origin.
+#' Death occurs at the transition time, so a death contributes ax of the
+#' interval in its origin state.
+#' Used by: calculate_group_dxh() in R/09_manhattan.R.
+calc_dxh <- function(p_tibble,
+                     age_int = 1,
+                     init = c(H = 1, U = 0),
+                     ax = 0,
+                     keep_zero = FALSE) {
+  required_transitions <- c("HH", "HU", "HD", "UH", "UU", "UD")
+  missing_columns <- setdiff(c("age", required_transitions), names(p_tibble))
+  if (length(missing_columns) > 0) {
+    stop("Missing column(s): ", paste(missing_columns, collapse = ", "))
+  }
+  if (length(ax) != 1L || is.na(ax) || !is.finite(ax) || ax < 0 || ax > 1) {
+    stop("ax must be one finite number between 0 and 1.")
+  }
+  if (length(age_int) != 1L || is.na(age_int) || !is.finite(age_int) || age_int <= 0) {
+    stop("age_int must be one positive finite number.")
+  }
+  if (!all(c("H", "U") %in% names(init)) ||
+      anyNA(init[c("H", "U")]) ||
+      any(!is.finite(init[c("H", "U")])) ||
+      any(init[c("H", "U")] < 0) ||
+      abs(sum(init[c("H", "U")]) - 1) > 1e-8) {
+    stop("init must be a non-negative H/U vector that sums to one.")
+  }
+  
   p_tibble <- p_tibble |>
     dplyr::arrange(age)
-  
   ages <- p_tibble$age
-  min_age <- min(ages)
-  n_ages <- length(ages)
+  if (length(ages) < 1L || anyNA(ages) || any(!is.finite(ages))) {
+    stop("age must contain at least one finite value.")
+  }
+  if (length(ages) > 1L && any(abs(diff(ages) - age_int) > 1e-8)) {
+    stop("Ages must be consecutive and separated by age_int.")
+  }
   
-  H <- unname(init["H"])
-  U <- unname(init["U"])
-  out <- vector("list", n_ages)
+  probability_matrix <- as.matrix(p_tibble[required_transitions])
+  if (anyNA(probability_matrix) || any(!is.finite(probability_matrix)) ||
+      any(probability_matrix < 0 | probability_matrix > 1)) {
+    stop("Transition probabilities must be finite values between zero and one.")
+  }
+  row_sums <- c(
+    p_tibble$HH + p_tibble$HU + p_tibble$HD,
+    p_tibble$UH + p_tibble$UU + p_tibble$UD
+  )
+  if (any(abs(row_sums - 1) > 1e-8)) {
+    stop("Each H/U transition row must sum to one.")
+  }
   
-  for (i in seq_len(n_ages)) {
-    age_i <- ages[i]
-    x_i <- age_i - min_age
-    h_i <- seq.int(0, length(H) - 1L) * age_int
-    u_i <- x_i - h_i
-    terminal <- i == n_ages
+  # Each stock is indexed by accumulated healthy years. Total elapsed years
+  # determine unhealthy years, so u = x - h.
+  mass_by_state <- list(
+    H = tibble::tibble(h = 0, mass = unname(init["H"])),
+    U = tibble::tibble(h = 0, mass = unname(init["U"]))
+  )
+  death_parts <- vector("list", length(ages))
+  
+  for (age_index in seq_along(ages)) {
+    age_now <- ages[age_index]
+    elapsed_now <- (age_now - ages[1])
+    terminal <- age_index == length(ages)
     
-    qH <- if (terminal) 1 else p_tibble$HD[i]
-    qU <- if (terminal) 1 else p_tibble$UD[i]
-    
-    out[[i]] <- dplyr::bind_rows(
-      tibble::tibble(
-        current_state = "H",
-        age = age_i,
-        x = x_i,
-        h = h_i,
-        u = u_i,
-        lxsc = H,
-        dxsc = H * qH
-      ),
-      tibble::tibble(
-        current_state = "U",
-        age = age_i,
-        x = x_i,
-        h = h_i,
-        u = u_i,
-        lxsc = U,
-        dxsc = U * qU
+    if (terminal) {
+      terminal_stock <- dplyr::bind_rows(
+        mass_by_state$H |> dplyr::mutate(current_state = "H"),
+        mass_by_state$U |> dplyr::mutate(current_state = "U")
       )
-    )
-    
-    if (!terminal) {
-      # Arrival in H increments accumulated healthy duration by one step.
-      H_next <- numeric(length(H) + 1L)
-      H_next[-1L] <- H * p_tibble$HH[i] + U * p_tibble$UH[i]
-      
-      # Arrival in U leaves accumulated healthy duration unchanged.
-      U_next <- numeric(length(U) + 1L)
-      U_next[seq_along(U)] <- U * p_tibble$UU[i] + H * p_tibble$HU[i]
-      
-      H <- H_next
-      U <- U_next
+      death_parts[[age_index]] <- terminal_stock |>
+        dplyr::transmute(
+          current_state,
+          age = age_now,
+          x = elapsed_now,
+          h,
+          u = elapsed_now - h,
+          dxsc = mass
+        )
+      next
     }
+    
+    next_mass_by_state <- list(H = list(), U = list())
+    deaths_this_age <- list()
+    death_part_number <- 0L
+    
+    for (origin in c("H", "U")) {
+      origin_stock <- mass_by_state[[origin]]
+      origin_h_increment <- if (origin == "H") ax * age_int else 0
+      
+      for (destination in c("H", "U", "D")) {
+        transition <- paste0(origin, destination)
+        transition_probability <- p_tibble[[transition]][age_index]
+        branch <- origin_stock |>
+          dplyr::mutate(mass = mass * transition_probability)
+        
+        if (destination == "D") {
+          death_part_number <- death_part_number + 1L
+          death_time <- elapsed_now + ax * age_int
+          deaths_this_age[[death_part_number]] <- branch |>
+            dplyr::mutate(
+              h_death = round(h + origin_h_increment, 10),
+              u_death = death_time - h_death
+            ) |>
+            dplyr::transmute(
+              current_state = origin,
+              age = ages[1] + death_time,
+              x = death_time,
+              h = h_death,
+              u = u_death,
+              dxsc = mass
+            )
+        } else {
+          destination_h_increment <- if (destination == "H") {
+            (1 - ax) * age_int
+          } else {
+            0
+          }
+          next_mass_by_state[[destination]][[length(next_mass_by_state[[destination]]) + 1L]] <-
+            branch |>
+            dplyr::transmute(
+              h = round(h + origin_h_increment + destination_h_increment, 10),
+              mass
+            )
+        }
+      }
+    }
+    
+    death_parts[[age_index]] <- dplyr::bind_rows(deaths_this_age)
+    mass_by_state <- lapply(next_mass_by_state, function(state_parts) {
+      if (length(state_parts) == 0L) {
+        return(tibble::tibble(h = numeric(), mass = numeric()))
+      }
+      dplyr::bind_rows(state_parts) |>
+        dplyr::group_by(h) |>
+        dplyr::summarise(mass = sum(mass), .groups = "drop")
+    })
   }
   
-  ans <- dplyr::bind_rows(out)
+  answer <- dplyr::bind_rows(death_parts)
   if (!keep_zero) {
-    ans <- dplyr::filter(ans, lxsc > 0 | dxsc > 0)
+    answer <- dplyr::filter(answer, dxsc > 0)
   }
-  ans
+  answer
 }
+
+
+calculate_group_dxh <- function(.x, .y,
+                                expected_ages, required_transitions,
+                                radix_age, last_age,
+                                ax = 1) {
+  probability_wide <- .x %>%
+    mutate(transition = paste0(as.character(from), as.character(to))) %>%
+    select(age, transition, prob) %>%
+    pivot_wider(names_from = transition, values_from = prob) %>%
+    arrange(age)
+  
+  missing_transitions <- setdiff(required_transitions, names(probability_wide))
+  if (length(missing_transitions) > 0) {
+    stop(
+      "A model group is missing transition(s): ",
+      paste(missing_transitions, collapse = ", ")
+    )
+  }
+  
+  if (!identical(as.integer(probability_wide$age), expected_ages)) {
+    stop(
+      "Each model group must have one complete annual probability grid from age ",
+      radix_age, " through ", last_age, "."
+    )
+  }
+  
+  if (anyNA(probability_wide[required_transitions])) {
+    stop("A model group has an incomplete age-by-transition probability grid.")
+  }
+  
+  initial_composition <- init_constant(probability_wide[1, ])
+  
+  # calc_dxh_fast() treats its final input row as the terminal age and forces
+  # qH = qU = 1 there. This row closes the life table after the age-110 step.
+  probability_wide <- probability_wide %>%
+    add_row(
+      age = last_age + 1L,
+      HH = 0,
+      HU = 0,
+      HD = 1,
+      UH = 0,
+      UU = 0,
+      UD = 1
+    )
+  
+  calc_dxh(
+    p_tibble = probability_wide %>% select(age, all_of(required_transitions)),
+    age_int = 1,
+    init = initial_composition,
+    keep_zero = FALSE,
+    ax = ax
+  )
+}
+
 
 #' Find a requested SHARE data file loose or inside a ZIP archive.
 #' Used by: R/01_extract_SHARE_files.R.
@@ -501,40 +640,183 @@ hazards_to_probabilities <- function(.x, .y, age_interval) {
     mutate(prob = as.numeric(prob))
 }
 
-#' Calculate survivorship, state expectancy, and HDAG for one stratum.
+# Timing convention:
+#   ax is the fraction of each age interval lived before a transition occurs.
+#   At ax = 0 transitions occur at the interval start; at ax = 1 they occur at
+#   its end. Expected time in a state during an interval is interpolated between
+#   the state distribution at its two birthdays using this same ax.
+#
+# The age-expanded fundamental matrix calculates conditional survivorship from
+# every possible starting age and state in one solve. Its interval rewards give
+# HLEh, ULEh, HLEu, and ULEu without repeating a forward recursion for every
+# starting age. Set return_details = TRUE to inspect the tidy conditional lxs
+# and Lxs records alongside the usual age-specific result. Source
+# R/00_functions.R first so init_constant() and the project packages are loaded.
+# -----------------------------------------------------------------------------
+
+#' Calculate age-specific life-table and HDAG quantities for one group.
 #' Used by: R/08_hdag.R.
-calculate_group_hdag <- function(.x, .y, required_transitions) {
-  transition_probabilities <- .x %>%
-    mutate(from_to = paste0(as.character(from), as.character(to))) %>%
-    select(age, from_to, prob)
-  
-  probability_wide <- transition_probabilities %>%
-    pivot_wider(names_from = from_to, values_from = prob) %>%
-    arrange(age)
-  
-  missing_transitions <- setdiff(required_transitions, names(probability_wide))
-  if (length(missing_transitions) > 0) {
-    stop(
-      "A model group is missing transition(s): ",
-      paste(missing_transitions, collapse = ", ")
-    )
+calculate_group_hdag <- function(.x, .y,
+                                 required_transitions,
+                                 age_interval = 1,
+                                 ax = 0,
+                                 return_details = FALSE) {
+  if (length(age_interval) != 1L || is.na(age_interval) ||
+      !is.finite(age_interval) || age_interval <= 0) {
+    stop("age_interval must be one finite positive number.")
+  }
+  if (length(ax) != 1L || is.na(ax) || !is.finite(ax) || ax < 0 || ax > 1) {
+    stop("ax must be one finite number between 0 and 1.")
   }
   
+  probability_wide <- .x %>%
+    dplyr::mutate(
+      # Normalize labels/factors to plain numeric before adding the terminal
+      # age; this avoids class-specific arithmetic changing the final grid.
+      age = as.numeric(as.character(age)),
+      from = as.character(from),
+      to = as.character(to),
+      prob = as.numeric(prob),
+      from_to = paste0(from, to)
+    ) %>%
+    dplyr::select(age, from_to, prob) %>%
+    tidyr::pivot_wider(names_from = from_to, values_from = prob) %>%
+    dplyr::arrange(age)
+  
+  missing_transitions <- setdiff(required_transitions, names(probability_wide))
+  if (length(missing_transitions) > 0L) {
+    stop("A model group is missing transition(s): ",
+         paste(missing_transitions, collapse = ", "))
+  }
   if (anyNA(probability_wide[required_transitions])) {
     stop("A model group has an incomplete age-by-transition probability grid.")
   }
   
-  age_steps <- diff(probability_wide$age)
-  if (length(age_steps) > 0 && any(abs(age_steps - 1) > 1e-8)) {
-    stop("A model group must have consecutive one-year ages for this life-table calculation.")
+  ages <- probability_wide$age
+  n_ages <- length(ages)
+  if (n_ages < 1L) stop("A model group has no age rows.")
+  if (anyNA(ages) || any(!is.finite(ages))) {
+    stop("A model group has a missing or non-numeric age value.")
+  }
+  if (n_ages > 1L && any(abs(diff(ages) - age_interval) > 1e-8)) {
+    stop("A model group must have consecutive ages separated by age_interval.")
   }
   
-  initial <- init_constant(probability_wide[1, ])
+  states <- c("H", "U")
+  terminal_age <- max(ages) + age_interval
+  node_ages <- c(ages, terminal_age)
+  node_names <- paste0(
+    rep(states, times = length(node_ages)), "__",
+    rep(format(node_ages, scientific = FALSE, trim = TRUE), each = length(states))
+  )
+  node_count <- length(node_names)
   
-  # mscalc returns start-of-interval survivorship for each transient state.
-  # The probabilities at the final age are retained for final-age transfers;
-  # they do not change survivorship at that same age.
-  lxs <- mscalc:::calc_survivorship(
+  # Build each age-specific transient transition matrix. Death has no outgoing
+  # transitions and is therefore omitted from these H/U blocks.
+  transient_by_age <- vector("list", n_ages)
+  for (age_index in seq_len(n_ages)) {
+    transient_by_age[[age_index]] <- matrix(
+      c(
+        probability_wide$HH[age_index], probability_wide$HU[age_index],
+        probability_wide$UH[age_index], probability_wide$UU[age_index]
+      ),
+      nrow = 2L,
+      byrow = TRUE,
+      dimnames = list(states, states)
+    )
+  }
+  
+  # U advances the age-state node by one interval. N = (I - U)^-1 gives the
+  # expected number of birthday visits to every later age-state, conditional
+  # on starting at each age-state.
+  age_expanded_U <- matrix(
+    0,
+    nrow = node_count,
+    ncol = node_count,
+    dimnames = list(node_names, node_names)
+  )
+  for (age_index in seq_len(n_ages)) {
+    current_rows <- (age_index - 1L) * 2L + seq_len(2L)
+    next_columns <- age_index * 2L + seq_len(2L)
+    age_expanded_U[current_rows, next_columns] <- transient_by_age[[age_index]]
+  }
+  fundamental_N <- solve(diag(node_count) - age_expanded_U)
+  
+  conditional_lxs <- as.data.frame(fundamental_N, check.names = FALSE) %>%
+    tibble::rownames_to_column("state_age_from") %>%
+    tidyr::pivot_longer(
+      cols = -state_age_from,
+      names_to = "state_age_to",
+      values_to = "lxs"
+    ) %>%
+    tidyr::separate_wider_delim(
+      state_age_from,
+      delim = "__",
+      names = c("state_from", "age_from")
+    ) %>%
+    tidyr::separate_wider_delim(
+      state_age_to,
+      delim = "__",
+      names = c("state_to", "age_to")
+    ) %>%
+    dplyr::mutate(
+      age_from = as.numeric(age_from),
+      age_to = as.numeric(age_to)
+    ) %>%
+    dplyr::filter(age_to >= age_from - 1e-8) %>%
+    dplyr::arrange(state_from, age_from, state_to, age_to)
+  
+  # For a starting age-state and a destination state, Lxs(x) is the interval
+  # exposure implied by conditional birthday survivorship at both endpoints:
+  # age_interval * {ax*lxs(x) + (1-ax)*lxs(x+age_interval)}. Summing Lxs over
+  # attained ages gives each of the four conditional state expectancies.
+  conditional_Lxs <- conditional_lxs %>%
+    dplyr::group_by(state_from, age_from, state_to) %>%
+    dplyr::arrange(age_to, .by_group = TRUE) %>%
+    dplyr::mutate(
+      lxs_next = dplyr::lead(lxs),
+      Lxs = age_interval * (ax * lxs + (1 - ax) * lxs_next)
+    ) %>%
+    dplyr::filter(age_to < terminal_age - 1e-8) %>%
+    dplyr::ungroup()
+  
+  conditional_expectancies <- conditional_Lxs %>%
+    dplyr::group_by(state_from, age_from, state_to) %>%
+    dplyr::summarise(expectancy = sum(Lxs, na.rm = TRUE), .groups = "drop") %>%
+    dplyr::mutate(
+      expectancy_name = dplyr::case_when(
+        state_from == "H" & state_to == "H" ~ "HLEh",
+        state_from == "U" & state_to == "H" ~ "HLEu",
+        state_from == "H" & state_to == "U" ~ "ULEh",
+        state_from == "U" & state_to == "U" ~ "ULEu"
+      )
+    ) %>%
+    tidyr::pivot_wider(
+      # The four labels already encode both starting and destination state.
+      # Keeping state_from as an id column here would leave two rows per age
+      # and duplicate the life-table rows at the join below.
+      id_cols = age_from,
+      names_from = expectancy_name,
+      values_from = expectancy
+    ) %>%
+    dplyr::select(age = age_from, HLEh, ULEh, HLEu, ULEu)
+  
+  if (anyDuplicated(conditional_expectancies$age)) {
+    stop("Conditional expectancies must have exactly one row per starting age.")
+  }
+  
+  # Cohort survivorship at birthdays, beginning with the stationary H/U mix
+  # implied by the first age's transition matrix (the project's init_constant).
+  # Keep the existing mscalc survivorship calculation unchanged; only extend it
+  # one birthday to close the final age interval for Lx and conditional Lxs.
+  initial_probabilities <- probability_wide[1L, , drop = FALSE]
+  initial <- init_constant(initial_probabilities)
+  transition_probabilities <- .x %>%
+    dplyr::mutate(
+      from_to = paste0(as.character(from), as.character(to))
+    ) %>%
+    dplyr::select(age, from_to, prob)
+  cohort_lxs <- mscalc:::calc_survivorship(
     transitions = transition_probabilities,
     init = initial,
     delim = "",
@@ -542,134 +824,129 @@ calculate_group_hdag <- function(.x, .y, required_transitions) {
     trans_col = "from_to",
     p_col = "prob"
   ) %>%
-    select(age, H, U) %>%
-    rename(lh = H, lu = U)
-  
-  # Expected future years in H and U conditional on each starting state.
-  # This backward recursion is the age-structured equivalent of the
-  # fundamental-matrix calculation in the original HDAG script.
-  n_ages <- nrow(probability_wide)
-  expected_years <- matrix(
-    0,
-    nrow = n_ages,
-    ncol = 4,
-    dimnames = list(NULL, c("HLEh", "ULEh", "HLEu", "ULEu"))
-  )
-  expected_years_next_age <- matrix(
-    0,
-    nrow = 2,
-    ncol = 2,
-    dimnames = list(c("H", "U"), c("H", "U"))
-  )
-  
-  for (age_index in rev(seq_len(n_ages))) {
-    transient_matrix <- matrix(
-      c(
-        probability_wide$HH[age_index], probability_wide$HU[age_index],
-        probability_wide$UH[age_index], probability_wide$UU[age_index]
-      ),
-      nrow = 2,
-      byrow = TRUE,
-      dimnames = list(c("H", "U"), c("H", "U"))
-    )
-    
-    expected_years_this_age <- diag(2) + transient_matrix %*% expected_years_next_age
-    expected_years[age_index, ] <- c(
-      expected_years_this_age["H", "H"],
-      expected_years_this_age["H", "U"],
-      expected_years_this_age["U", "H"],
-      expected_years_this_age["U", "U"]
-    )
-    expected_years_next_age <- expected_years_this_age
+    dplyr::select(age, H, U) %>%
+    dplyr::rename(lh = H, lu = U) %>%
+    dplyr::arrange(age)
+  if (anyDuplicated(cohort_lxs$age)) {
+    stop("Cohort survivorship must have exactly one row per age.")
   }
-  
-  expectancy_by_age <- tibble(
-    age = probability_wide$age,
-    HLEh = expected_years[, "HLEh"],
-    ULEh = expected_years[, "ULEh"],
-    HLEu = expected_years[, "HLEu"],
-    ULEu = expected_years[, "ULEu"]
+  terminal_survivorship <- as.numeric(
+    c(cohort_lxs$lh[nrow(cohort_lxs)], cohort_lxs$lu[nrow(cohort_lxs)]) %*%
+      transient_by_age[[n_ages]]
+  )
+  cohort_lxs <- dplyr::bind_rows(
+    cohort_lxs,
+    tibble::tibble(
+      age = terminal_age,
+      lh = terminal_survivorship[1L],
+      lu = terminal_survivorship[2L]
+    )
   )
   
+  # Join the birth-age conditional expectancies to the cohort life table.
   result <- probability_wide %>%
-    left_join(lxs, by = "age") %>%
-    left_join(expectancy_by_age, by = "age") %>%
-    mutate(
+    dplyr::left_join(cohort_lxs, by = "age") %>%
+    dplyr::left_join(conditional_expectancies, by = "age")
+  
+  # Add the terminal birthday row. It closes the life table at the end of the
+  # supplied probability schedule; there is no post-terminal interval exposure.
+  terminal_row <- tibble::tibble(
+    age = terminal_age,
+    HH = NA_real_, HU = NA_real_, HD = NA_real_,
+    UH = NA_real_, UU = NA_real_, UD = NA_real_,
+    lh = cohort_lxs$lh[nrow(cohort_lxs)],
+    lu = cohort_lxs$lu[nrow(cohort_lxs)],
+    HLEh = 0, ULEh = 0, HLEu = 0, ULEu = 0
+  )
+  result <- dplyr::bind_rows(result, terminal_row) %>%
+    dplyr::arrange(age)
+  
+  # Cohort transfer counts at each age interval.
+  result <- result %>%
+    dplyr::mutate(
       HDt = HD * lh,
       HUt = HU * lh,
       UHt = UH * lu,
       UDt = UD * lu,
-      dx = UDt + HDt,
-      lx = lh + lu,
-      ex = rev(cumsum(rev(lx))) / lx,
-      edag = dx * ex,
-      HLEdag_hu = HUt * (1 + lead(HLEh, default = 0) - lead(HLEu, default = 0)),
-      HLEdag_hd = HDt * HLEh,
-      HLEdag_uh = UHt * (-1 + lead(HLEu, default = 0) - lead(HLEh, default = 0)),
-      HLEdag_ud = UDt * HLEu,
-      ULEdag_hu = HUt * (-1 + lead(ULEh, default = 0) - lead(ULEu, default = 0)),
-      ULEdag_hd = HDt * ULEh,
-      ULEdag_uh = UHt * (1 + lead(ULEu, default = 0) - lead(ULEh, default = 0)),
-      ULEdag_ud = UDt * ULEu,
-      LEdag_hu = ULEdag_hu + HLEdag_hu,
-      LEdag_hd = ULEdag_hd + HLEdag_hd,
-      LEdag_uh = ULEdag_uh + HLEdag_uh,
-      LEdag_ud = ULEdag_ud + HLEdag_ud
-    ) 
+      future_H_from_H = dplyr::lead(HLEh, default = 0),
+      future_H_from_U = dplyr::lead(HLEu, default = 0),
+      future_U_from_H = dplyr::lead(ULEh, default = 0),
+      future_U_from_U = dplyr::lead(ULEu, default = 0),
+      HLE_at_death_from_H = HLEh + ax * (future_H_from_H - HLEh),
+      HLE_at_death_from_U = HLEu + ax * (future_H_from_U - HLEu),
+      ULE_at_death_from_H = ULEh + ax * (future_U_from_H - ULEh),
+      ULE_at_death_from_U = ULEu + ax * (future_U_from_U - ULEu),
+      # Transition components compare the origin path with the destination
+      # path after the transition. Only the remaining (1 - ax) interval is
+      # credited to the post-transition state.
+      HLEdag_hu = HUt * ((1 - ax) * age_interval + future_H_from_H - future_H_from_U),
+      HLEdag_uh = UHt * (-(1 - ax) * age_interval + future_H_from_U - future_H_from_H),
+      ULEdag_hu = HUt * (-(1 - ax) * age_interval + future_U_from_H - future_U_from_U),
+      ULEdag_uh = UHt * ((1 - ax) * age_interval + future_U_from_U - future_U_from_H),
+      # Interpolate each origin-state expectancy to the assumed death age, in
+      # the same way as the life-table e-dagger helper below.
+      HLEdag_hd = HDt * HLE_at_death_from_H,
+      ULEdag_hd = HDt * ULE_at_death_from_H,
+      HLEdag_ud = UDt * HLE_at_death_from_U,
+      ULEdag_ud = UDt * ULE_at_death_from_U,
+      LEdag_hu = HLEdag_hu + ULEdag_hu,
+      LEdag_hd = HLEdag_hd + ULEdag_hd,
+      LEdag_uh = HLEdag_uh + ULEdag_uh,
+      LEdag_ud = HLEdag_ud + ULEdag_ud,
+      age_interval = age_interval,
+      ax = ax
+    ) %>%
+    dplyr::select(
+      -dplyr::starts_with("future_"),
+      -dplyr::starts_with("HLE_at_death_"),
+      -dplyr::starts_with("ULE_at_death_")
+    )
   
-  result
+  result <- result %>% dplyr::filter(age %in% ages)
+  if (!return_details) return(result)
+  
+  list(
+    age_specific = result,
+    conditional_lxs = conditional_lxs,
+    conditional_Lxs = conditional_Lxs,
+    conditional_expectancies = conditional_expectancies,
+    cohort_lxs = cohort_lxs,
+    age_expanded_U = age_expanded_U,
+    fundamental_N = fundamental_N
+  )
 }
 
-#' Calculate the 2D death distribution for one health, sex, year, and type.
-#' Used by: R/09_manhattan.R.
-calculate_group_dxh <- function(.x, .y,
-                               expected_ages, required_transitions,
-                               radix_age, last_age) {
-  probability_wide <- .x %>%
-    mutate(transition = paste0(as.character(from), as.character(to))) %>%
-    select(age, transition, prob) %>%
-    pivot_wider(names_from = transition, values_from = prob) %>%
-    arrange(age)
-  
-  missing_transitions <- setdiff(required_transitions, names(probability_wide))
-  if (length(missing_transitions) > 0) {
-    stop(
-      "A model group is missing transition(s): ",
-      paste(missing_transitions, collapse = ", ")
-    )
+#' Calculate age-specific e-dagger from a closed period life table.
+#' Used by: R/08_hdag.R after cohort survivorship and life-table columns exist.
+life_table_edag <- function(age, dx, lx, ex, ax, age_interval = 1) {
+  if (length(ax) != 1L || is.na(ax) || !is.finite(ax) || ax < 0 || ax > 1) {
+    stop("ax must be one finite number between 0 and 1.")
+  }
+  if (length(age_interval) != 1L || is.na(age_interval) ||
+      !is.finite(age_interval) || age_interval <= 0) {
+    stop("age_interval must be one finite positive number.")
+  }
+  if (!all(length(age) == length(dx), length(dx) == length(lx), length(lx) == length(ex))) {
+    stop("age, dx, lx, and ex must have the same length.")
+  }
+  if (length(age) > 1L) {
+    bad_steps <- which(abs(diff(age) - age_interval) > 1e-8)
+    if (length(bad_steps) > 0L) {
+      bad_intervals <- paste0(
+        age[bad_steps], " to ", age[bad_steps + 1L],
+        " (width ", diff(age)[bad_steps], ")"
+      )
+      stop(
+        "age values must be consecutive and separated by age_interval. ",
+        "Unexpected interval(s): ", paste(bad_intervals, collapse = "; ")
+      )
+    }
   }
   
-  if (!identical(as.integer(probability_wide$age), expected_ages)) {
-    stop(
-      "Each model group must have one complete annual probability grid from age ",
-      radix_age, " through ", last_age, "."
-    )
-  }
-  
-  if (anyNA(probability_wide[required_transitions])) {
-    stop("A model group has an incomplete age-by-transition probability grid.")
-  }
-  
-  initial_composition <- init_constant(probability_wide[1, ])
-  
-  # calc_dxh_fast() treats its final input row as the terminal age and forces
-  # qH = qU = 1 there. This row closes the life table after the age-110 step.
-  probability_wide <- probability_wide %>%
-    add_row(
-      age = last_age + 1L,
-      HH = 0,
-      HU = 0,
-      HD = 1,
-      UH = 0,
-      UU = 0,
-      UD = 1
-    )
-  
-  calc_dxh_fast(
-    p_tibble = probability_wide %>% select(age, all_of(required_transitions)),
-    age_int = 1,
-    init = initial_composition,
-    keep_zero = FALSE
-  )
+  ex_next <- c(ex[-1L], 0)
+  ex_at_death <- ex + ax * (ex_next - ex)
+  edag <- rev(cumsum(rev(dx * ex_at_death))) / lx
+  edag[!is.finite(edag)] <- 0
+  edag
 }
 

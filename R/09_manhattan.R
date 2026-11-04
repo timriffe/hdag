@@ -74,7 +74,6 @@ probabilities_for_dxh <- probabilities %>%
   filter(between(age, radix_age, last_age))
 
 
-
 # calc_dxh_fast() returns death mass split by state at death. Collapse that detail
 # to the joint distribution d(h,u) used in the Manhattan index.
 share_dxh <- probabilities_for_dxh %>%
@@ -84,7 +83,8 @@ share_dxh <- probabilities_for_dxh %>%
     expected_ages = expected_ages,
     required_transitions = required_transitions,
     radix_age = radix_age,
-    last_age = last_age
+    last_age = last_age,
+    ax = ax_assumption_global
   ) %>%
   ungroup() %>%
   group_by(health_var, sex, time, type, h, u) %>%
@@ -95,10 +95,6 @@ share_dxh <- probabilities_for_dxh %>%
     .groups = "drop"
   ) %>%
   arrange(health_var, sex, time, type, h, u)
-
-distribution_checks <- share_dxh %>%
-  group_by(health_var, sex, time, type) %>%
-  summarise(total_death_mass = sum(d_hu), .groups = "drop")
 
 if (any(abs(distribution_checks$total_death_mass - 1) > 1e-7)) {
   stop("At least one 2D death distribution does not sum to one after terminal-age closeout.")

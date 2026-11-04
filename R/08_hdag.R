@@ -66,17 +66,18 @@ if (nrow(duplicate_rows) > 0) {
 required_transitions <- c("HH", "HU", "HD", "UH", "UU", "UD")
 
 
-
-
-
 share_hdag <- probabilities %>%
   group_by(health_var, sex, time, type) %>%
   group_modify(
     calculate_group_hdag,
-    required_transitions = required_transitions
+    required_transitions = required_transitions,
+    ax = ax_assumption_global
   ) %>%
   ungroup() %>%
   arrange(health_var, sex, time, type, age)
+
+
+
 
 share_hdag_summary <- share_hdag %>%
   group_by(health_var, sex, time, type) %>%
